@@ -1,1 +1,897 @@
-（空文件）
+小程序页面
+const app = getApp()
+
+function pickFirst(obj, keys, fallback) {
+  for (let i = 0; i < keys.length; i += 1) {
+    const value = obj && obj[keys[i]]
+
+    if (value !== undefined && value !== null && value !== '') {
+      return value
+    }
+  }
+
+  return fallback
+}
+
+function isFullUrl(url) {
+  return /^https?:\/\//i.test(url)
+}
+
+function trimRightSlash(text) {
+  return String(text || '').replace(/\/+$/, '')
+}
+
+function trimLeftSlash(text) {
+  return String(text || '').replace(/^\/+/, '')
+}
+
+function encodePathPart(part) {
+  try {
+    return encodeURIComponent(decodeURIComponent(part))
+  } catch (err) {
+    return encodeURIComponent(part)
+  }
+}
+
+// 编码 OSS 路径，解决中文车牌文件名无法加载的问题
+function encodeOssKey(key) {
+  const text = String(key || '')
+  const parts = text.split('?')
+
+  const path = parts[0]
+    .split('/')
+    .map(part => encodePathPart(part))
+    .join('/')
+
+  if (parts.length > 1) {
+    return path + '?' + parts.slice(1).join('?')
+  }
+
+  return path
+}
+
+function normalizeImageUrl(url, preferOss) {
+  if (!url || typeof url !== 'string') {
+    return ''
+  }
+
+  const value = url.trim()
+
+  if (!value) {
+    return ''
+  }
+
+  // 后端直接返回完整 URL 时直接使用
+  if (isFullUrl(value)) {
+    return value
+  }
+
+  const ossBase = trimRightSlash(app.globalData.ossBaseUrl || '')
+  const apiBase = trimRightSlash(app.globalData.baseUrl || '')
+  const cleanPath = trimLeftSlash(value)
+
+  // image_key、oss_key 等字段优先拼接 OSS 地址
+  if (preferOss && ossBase) {
+    return ossBase + '/' + encodeOssKey(cleanPath)
+  }
+
+  // 后端静态资源路径
+  if (value.indexOf('/') === 0 && apiBase) {
+    return apiBase + value
+  }
+
+  // 普通相对路径默认按 OSS 地址处理
+  if (ossBase) {
+    return ossBase + '/' + encodeOssKey(cleanPath)
+  }
+
+  // 未配置 OSS 时回退到后端地址
+  if (apiBase) {
+    return apiBase + '/' + cleanPath
+  }
+
+  return ''
+}
+
+function normalizeImageValue(value, preferOss) {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => normalizeImageUrl(item, preferOss))
+      .filter(Boolean)
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const text = value.trim()
+
+    // 兼容后端返回 JSON 字符串数组
+    if (text.indexOf('[') === 0) {
+      try {
+        const parsed = JSON.parse(text)
+
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map(item => normalizeImageUrl(item, preferOss))
+            .filter(Boolean)
+        }
+      } catch (err) {
+        // JSON 解析失败时继续按照普通字符串处理
+      }
+    }
+
+    // 兼容多个图片使用逗号分隔
+    if (text.indexOf(',') > -1) {
+      return text
+        .split(',')
+        .map(item => normalizeImageUrl(item, preferOss))
+        .filter(Boolean)
+    }
+
+    return [normalizeImageUrl(text, preferOss)].filter(Boolean)
+  }
+
+  return []
+}
+
+function normalizeImages(item) {
+  // 可能是完整 URL 或相对路径的字段
+  const urlFields = [
+    item.images,
+    item.image_urls,
+    item.image_url,
+    item.snapshot_url,
+    item.picture_url,
+    item.pic_url,
+    item.image
+  ]
+
+  for (let i = 0; i < urlFields.length; i += 1) {
+    const result = normalizeImageValue(urlFields[i], false)
+
+    if (result.length) {
+      return result
+    }
+  }
+
+  // 后端 image_key 等 OSS 对象字段
+  const keyFields = [
+    item.image_key,
+    item.imageKey,
+    item.snapshot_key,
+    item.oss_key,
+    item.ossKey,
+    item.object_key,
+    item.objectKey,
+    item.file_key,
+    item.fileKey,
+    item.pic_key,
+    item.photo_key
+  ]
+
+  for (let i = 0; i < keyFields.length; i += 1) {
+    const result = normalizeImageValue(keyFields[i], true)
+
+    if (result.length) {
+      return result
+    }
+  }
+
+  return []
+}
+
+function friendlyType(type) {
+  const raw = String(type || '').trim()
+  const lower = raw.toLowerCase()
+
+  const map = {
+    violation_detected: '违规抓拍',
+    violation: '违规抓拍',
+    smoking: '车内抽烟',
+    phone_call: '接打电话',
+    no_seatbelt: '未系安全带',
+    seatbelt: '安全带异常',
+    fatigue: '疲劳驾驶',
+    illegal_parking: '违停告警',
+    lane_violation: '压线行驶',
+    throwing_garbage: '车窗抛物',
+    garbage_throwing: '车窗抛物',
+    littering: '车窗抛物',
+    '车窗抛物': '车窗抛物',
+    '车厢违规行为': '车厢违规行为',
+    '违规行为': '违规行为'
+  }
+
+  return map[lower] || map[raw] || raw || '违规抓拍'
+}
+
+function getRisk(type, level, confidence) {
+  const source = String(level || '').toLowerCase()
+  const eventType = String(type || '').toLowerCase()
+
+  if (
+    ['critical', 'high', '严重', '高', '紧急'].indexOf(source) > -1
+  ) {
+    return {
+      text: '高风险',
+      className: 'risk-high'
+    }
+  }
+
+  if (
+    ['medium', 'warning', '中', '一般'].indexOf(source) > -1
+  ) {
+    return {
+      text: '中风险',
+      className: 'risk-mid'
+    }
+  }
+
+  if (confidence >= 90) {
+    return {
+      text: '高风险',
+      className: 'risk-high'
+    }
+  }
+
+  if (confidence >= 70) {
+    return {
+      text: '中风险',
+      className: 'risk-mid'
+    }
+  }
+
+  if (
+    eventType.indexOf('violation') > -1 ||
+    eventType.indexOf('违规') > -1 ||
+    eventType.indexOf('throwing_garbage') > -1 ||
+    eventType.indexOf('garbage') > -1 ||
+    eventType.indexOf('抛物') > -1
+  ) {
+    return {
+      text: '高风险',
+      className: 'risk-high'
+    }
+  }
+
+  return {
+    text: '普通',
+    className: 'risk-low'
+  }
+}
+
+function normalizeStatus(status) {
+  const value = String(status || '').trim()
+
+  if (
+    value === '已处理' ||
+    value === 'done' ||
+    value === 'closed'
+  ) {
+    return {
+      text: '已处理',
+      className: 'status-done'
+    }
+  }
+
+  if (
+    value === '处理中' ||
+    value === 'processing' ||
+    value === 'pending'
+  ) {
+    return {
+      text: '处理中',
+      className: 'status-pending'
+    }
+  }
+
+  return {
+    text: value || '未处理',
+    className: 'status-todo'
+  }
+}
+
+function parseTimeValue(value) {
+  if (!value) {
+    return 0
+  }
+
+  if (typeof value === 'number') {
+    return value
+  }
+
+  const text = String(value).replace(/-/g, '/')
+  const time = new Date(text).getTime()
+
+  return isNaN(time) ? 0 : time
+}
+
+function two(num) {
+  return num < 10 ? '0' + num : String(num)
+}
+
+function formatNow() {
+  const date = new Date()
+
+  return (
+    two(date.getHours()) +
+    ':' +
+    two(date.getMinutes()) +
+    ':' +
+    two(date.getSeconds())
+  )
+}
+
+function todayString() {
+  const date = new Date()
+
+  return (
+    date.getFullYear() +
+    '-' +
+    two(date.getMonth() + 1) +
+    '-' +
+    two(date.getDate())
+  )
+}
+
+// 判断车牌是否有效
+function hasValidPlate(item) {
+  const plate = pickFirst(
+    item,
+    [
+      'license_plate',
+      'plate',
+      'vehicle_id',
+      'car_no',
+      'plate_no'
+    ],
+    ''
+  )
+
+  const text = String(plate || '').trim()
+  const upper = text.toUpperCase()
+
+  if (!text) {
+    return false
+  }
+
+  const invalidPlates = [
+    'NOPLATE',
+    'NO_PLATE',
+    'NO-PLATE',
+    'UNKNOWN',
+    'NULL',
+    'NONE',
+    '未识别',
+    '未知',
+    '无牌',
+    '车牌未识别'
+  ]
+
+  return invalidPlates.indexOf(upper) === -1
+}
+
+// 将有效车牌统一显示为苏开头
+
+
+function normalizeRecord(item, index) {
+  const rawType = pickFirst(
+    item,
+    [
+      'violation_type',
+      'event_type',
+      'event',
+      'type',
+      'alert_type',
+      'category',
+      'event_name'
+    ],
+    'violation_detected'
+  )
+
+  const eventName = pickFirst(
+    item,
+    [
+      'event_name',
+      'violation_type',
+      'event_type',
+      'alert_name'
+    ],
+    ''
+  )
+
+  const status = normalizeStatus(
+    pickFirst(
+      item,
+      ['status', 'process_status', 'state'],
+      '未处理'
+    )
+  )
+
+  const timestamp = pickFirst(
+    item,
+    [
+      'timestamp',
+      'time',
+      'created_at',
+      'event_time'
+    ],
+    ''
+  )
+
+  const rawLicensePlate = pickFirst(
+    item,
+    [
+      'license_plate',
+      'plate',
+      'vehicle_id',
+      'car_no',
+      'plate_no'
+    ],
+    ''
+  )
+
+  const licensePlate = rawLicensePlate
+
+  const deviceId = pickFirst(
+    item,
+    [
+      'device_id',
+      'device',
+      'imei',
+      'client_id'
+    ],
+    'L610'
+  )
+
+  const longitude =
+    Number(
+      pickFirst(
+        item,
+        ['longitude', 'lng', 'lon'],
+        0
+      )
+    ) || 0
+
+  const latitude =
+    Number(
+      pickFirst(
+        item,
+        ['latitude', 'lat'],
+        0
+      )
+    ) || 0
+
+  const confidence =
+    Number(
+      pickFirst(
+        item,
+        [
+          'confidence',
+          'score',
+          'probability',
+          'conf'
+        ],
+        0
+      )
+    ) || 0
+
+  const images = normalizeImages(item)
+
+  let address = pickFirst(
+    item,
+    [
+      'address',
+      'location_name',
+      'location',
+      'place',
+      'area'
+    ],
+    ''
+  )
+
+  // 避免继续显示 NOGPS
+  if (!address || String(address).toUpperCase() === 'NOGPS') {
+    address =
+      longitude && latitude
+        ? latitude.toFixed(6) + ', ' + longitude.toFixed(6)
+        : '暂无定位'
+  }
+
+  const videoKey = pickFirst(
+    item,
+    [
+      'video_key',
+      'videoKey',
+      'video_url',
+      'video'
+    ],
+    ''
+  )
+
+  const imageKey = pickFirst(
+    item,
+    [
+      'image_key',
+      'imageKey',
+      'snapshot_key'
+    ],
+    ''
+  )
+
+  const risk = getRisk(
+    rawType,
+    pickFirst(
+      item,
+      ['level', 'severity', 'risk_level'],
+      ''
+    ),
+    confidence
+  )
+
+  return {
+    id: pickFirst(
+      item,
+      ['id', 'event_id', 'uuid'],
+      index + 1
+    ),
+
+    raw: item,
+
+    license_plate:
+      licensePlate || deviceId || '未知车辆',
+
+    sub_title: licensePlate
+      ? '设备 ' + deviceId
+      : '车牌未识别',
+
+    timestamp: String(timestamp || '--'),
+    sortTime: parseTimeValue(timestamp),
+    dayKey: String(timestamp || '').slice(0, 10),
+
+    violation_type: friendlyType(rawType),
+    original_type: String(rawType || ''),
+    event_name:
+      eventName || friendlyType(rawType),
+
+    longitude: longitude,
+    latitude: latitude,
+    location: address,
+    address: address,
+
+    confidence: confidence,
+
+    images: images,
+    cover: images[0] || '',
+
+    device_id: deviceId,
+
+    status: status.text,
+    statusClass: status.className,
+
+    risk: risk.text,
+    riskClass: risk.className,
+
+    hasLocation: Boolean(longitude && latitude),
+
+    video_key: videoKey,
+    image_key: imageKey
+  }
+}
+
+Page({
+  data: {
+    allList: [],
+    violationList: [],
+
+    activeFilter: 'all',
+
+    filters: [
+      {
+        key: 'all',
+        label: '全部'
+      },
+      {
+        key: 'todo',
+        label: '未处理'
+      },
+      {
+        key: 'high',
+        label: '高风险'
+      },
+      {
+        key: 'done',
+        label: '已处理'
+      }
+    ],
+
+    stats: {
+      total: 0,
+      todo: 0,
+      today: 0,
+      devices: 0
+    },
+
+    latestTime: '--',
+    syncTime: '--',
+
+    loading: true,
+    errorText: '',
+    connected: false
+  },
+
+  onLoad() {
+    this.requesting = false
+
+    // 页面打开后立即获取一次数据
+    this.fetchEvents(false)
+
+    // 启动每5秒自动刷新
+    this.startAutoRefresh()
+  },
+
+  onShow() {
+    this.applyFilter()
+  },
+
+  onUnload() {
+    this.stopAutoRefresh()
+  },
+
+  onPullDownRefresh() {
+    this.fetchEvents(true)
+  },
+
+  startAutoRefresh() {
+    this.stopAutoRefresh()
+
+    this.timer = setInterval(() => {
+      this.fetchEvents(false, true)
+    }, 5000)
+  },
+
+  stopAutoRefresh() {
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
+    }
+  },
+
+  buildStats(list) {
+    const today = todayString()
+    const devices = {}
+
+    list.forEach(item => {
+      if (item.device_id) {
+        devices[item.device_id] = true
+      }
+    })
+
+    return {
+      total: list.length,
+
+      todo: list.filter(
+        item => item.status !== '已处理'
+      ).length,
+
+      today: list.filter(
+        item => item.dayKey === today
+      ).length,
+
+      devices: Object.keys(devices).length
+    }
+  },
+
+  extractList(data) {
+    if (Array.isArray(data)) {
+      return data
+    }
+
+    if (data && Array.isArray(data.events)) {
+      return data.events
+    }
+
+    if (data && Array.isArray(data.data)) {
+      return data.data
+    }
+
+    if (data && Array.isArray(data.records)) {
+      return data.records
+    }
+
+    if (data && Array.isArray(data.list)) {
+      return data.list
+    }
+
+    if (data && Array.isArray(data.items)) {
+      return data.items
+    }
+
+    return []
+  },
+
+  fetchEvents(isPullDown, silent) {
+    // 防止上一次请求未完成时再次发送请求
+    if (this.requesting) {
+      if (isPullDown) {
+        wx.stopPullDownRefresh()
+      }
+
+      return
+    }
+
+    this.requesting = true
+
+    if (!silent) {
+      this.setData({
+        loading: true,
+        errorText: ''
+      })
+    }
+
+    wx.request({
+      // 获取后端最近200条事件记录
+      url:
+        app.globalData.baseUrl +
+        '/events?limit=200',
+
+      method: 'GET',
+
+      // 200条数据适当增加超时时间
+      timeout: 20000,
+
+      success: res => {
+        const sourceList =
+          this.extractList(res.data)
+
+        // 后端最多返回200条；
+        // 过滤无效车牌后，实际显示数量可能少于200条
+        const normalized = sourceList
+          .filter(item => hasValidPlate(item))
+          .map((item, index) =>
+            normalizeRecord(item, index)
+          )
+          .sort(
+            (a, b) => b.sortTime - a.sortTime
+          )
+
+        this.setData({
+          allList: normalized,
+
+          stats: this.buildStats(normalized),
+
+          latestTime: normalized.length
+            ? normalized[0].timestamp
+            : '--',
+
+          syncTime: formatNow(),
+
+          connected: true,
+          errorText: ''
+        })
+
+        this.applyFilter()
+
+        // 只保留一条轻量日志
+        console.log(
+          '[fetchEvents] 最近记录：',
+          sourceList.length,
+          '条；有效车牌：',
+          normalized.length,
+          '条'
+        )
+      },
+
+      fail: err => {
+        console.error(
+          '[fetchEvents] 请求失败：',
+          err
+        )
+
+        this.setData({
+          connected: false,
+
+          errorText:
+            '无法连接 ECS 后台，请检查后台服务、接口地址或网络设置。'
+        })
+      },
+
+      complete: () => {
+        this.requesting = false
+
+        this.setData({
+          loading: false
+        })
+
+        if (isPullDown) {
+          wx.stopPullDownRefresh()
+        }
+      }
+    })
+  },
+
+  applyFilter() {
+    const key = this.data.activeFilter
+
+    const list = this.data.allList.filter(
+      item => {
+        if (key === 'todo') {
+          return item.status !== '已处理'
+        }
+
+        if (key === 'done') {
+          return item.status === '已处理'
+        }
+
+        if (key === 'high') {
+          return item.risk === '高风险'
+        }
+
+        return true
+      }
+    )
+
+    this.setData({
+      violationList: list
+    })
+  },
+
+  changeFilter(event) {
+    const key =
+      event.currentTarget.dataset.key
+
+    this.setData(
+      {
+        activeFilter: key
+      },
+      () => {
+        this.applyFilter()
+      }
+    )
+  },
+
+  handleManualRefresh() {
+    this.fetchEvents(false)
+  },
+
+  previewImage(event) {
+    const urls =
+      event.currentTarget.dataset.urls || []
+
+    const current =
+      event.currentTarget.dataset.current || ''
+
+    if (!urls.length) {
+      return
+    }
+
+    wx.previewImage({
+      urls: urls,
+      current: current || urls[0]
+    })
+  },
+
+  onImageError(event) {
+    console.error(
+      '[图片加载失败]',
+      event.currentTarget.dataset.src,
+      event.detail
+    )
+  },
+
+  goToDetail(event) {
+    const index =
+      event.currentTarget.dataset.index
+
+    const item =
+      this.data.violationList[index]
+
+    if (!item) {
+      return
+    }
+
+    app.globalData.currentRecord = item
+
+    wx.navigateTo({
+      url: '/pages/detail/detail'
+    })
+  }
+})
